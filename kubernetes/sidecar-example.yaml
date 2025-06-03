@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+    spec:
+      # 指定使用metrics-sidecar的ServiceAccount
+      serviceAccountName: metrics-sidecar
+      containers:
+      - name: main-app
+        image: your-app-image:latest
+        ports:
+        - containerPort: 80
+        # 配置就绪探针指向sidecar的健康检查接口
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 2
+          successThreshold: 1
+        resources:
+          limits:
+            cpu: "1000m"
+            memory: "1024Mi"
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+            
+      # 监控sidecar容器
+      - name: metrics-sidecar
+        image: metrics-sidecar:latest
+        ports:
+        - containerPort: 8333
+        env:
+        # 自动获取当前命名空间和Pod名称
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # 配置目标监控对象
+        - name: DEPLOYMENT_NAME
+          value: "example-app"
+        - name: CONTAINER_NAME
+          value: "main-app"
+        # 资源阈值配置
+        - name: RESOURCE_THRESHOLD_MEMORY_PERCENT
+          value: "80"
+        - name: RESOURCE_THRESHOLD_CPU_PERCENT
+          value: "80"
+        - name: MINIMUM_PODS_TO_KEEP_PERCENT
+          value: "30"
+        # 服务端口
+        - name: HTTP_PORT
+          value: "8333"
+        # sidecar资源限制（轻量级）
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        # 存活探针
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8333
+          initialDelaySeconds: 60
+          periodSeconds: 30 
+          timeoutSeconds: 5
+          failureThreshold: 5
+          successThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8333
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 3
+        

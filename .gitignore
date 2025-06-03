@@ -1,0 +1,35 @@
+# Kubernetes配置文件
+kube-config.yaml
+
+# 环境变量文件
+.env
+!.env.example
+.env.local
+!.env.local.example
+.direnv/
+.envrc
+
+# 二进制文件和构建产物
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+*.test
+*.tmp
+
+# 日志文件
+*.log
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 操作系统文件
+.DS_Store
+Thumbs.db 

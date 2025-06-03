@@ -1,0 +1,10 @@
+# 本地环境变量配置示例
+# 复制此文件为.env.local并按需修改
+
+# 覆盖基础配置
+export NAMESPACE="custom-namespace"
+export DEPLOYMENT_NAME="custom-app"
+export CONTAINER_NAME="custom-container"
+export POD_NAME="custom-pod-id"
+
+# 其他自定义配置

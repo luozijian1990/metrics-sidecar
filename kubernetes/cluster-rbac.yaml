@@ -1,0 +1,40 @@
+---
+# ServiceAccount用于metrics-sidecar容器
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metrics-sidecar-cluster
+  namespace: monitoring
+---
+# ClusterRole定义所需权限，允许访问集群中的所有命名空间
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-sidecar-cluster-role
+rules:
+# 访问所有命名空间中的Deployment信息
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+# 访问所有命名空间中的Pod信息
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+# 访问所有命名空间中的metrics.k8s.io API资源
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+---
+# ClusterRoleBinding将ClusterRole绑定到ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-sidecar-cluster-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: metrics-sidecar-cluster
+  namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: metrics-sidecar-cluster-role
+  apiGroup: rbac.authorization.k8s.io 
