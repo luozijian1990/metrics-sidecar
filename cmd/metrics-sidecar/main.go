@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,7 +18,7 @@ import (
 	"metrics-sidecar/pkg/metrics"
 )
 
-// 自定义日志格式的HTTP服务器
+// loggingHandler 自定义日志格式的HTTP服务器
 type loggingHandler struct {
 	handler http.Handler
 }
@@ -32,7 +34,39 @@ func (h loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.RemoteAddr, r.Method, r.URL.Path, time.Since(start))
 }
 
-// 检查metrics.k8s.io API是否可用
+// setupHTTPServer 配置HTTP服务器和路由
+func setupHTTPServer(healthHandler http.Handler, metricsHandler http.Handler, port string) *http.Server {
+	// 设置HTTP路由
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", healthHandler)
+	mux.Handle("/metrics", metricsHandler)
+
+	// 添加首页路由，提供基本信息
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("指标采集服务正在运行\n\n可用接口:\n- /healthz: 健康检查\n- /metrics: 资源指标"))
+	})
+
+	// 创建带日志的HTTP服务器
+	loggedRouter := loggingHandler{handler: mux}
+
+	// 创建HTTP服务器
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      loggedRouter,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	return server
+}
+
+// checkMetricsAPIAvailability 检查metrics.k8s.io API是否可用
 func checkMetricsAPIAvailability(k8sClient *k8s.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -94,34 +128,34 @@ func main() {
 	metricsHandler := handlers.NewMetricsHandler(k8sClient, metricsCollector, cfg, healthHandler)
 	log.Printf("HTTP处理器创建成功")
 
-	// 设置HTTP路由
-	mux := http.NewServeMux()
-	mux.Handle("/healthz", healthHandler)
-	mux.Handle("/metrics", metricsHandler)
-
-	// 添加首页路由，提供基本信息
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("指标采集服务正在运行\n\n可用接口:\n- /healthz: 健康检查\n- /metrics: 资源指标"))
-	})
-
-	// 创建带日志的HTTP服务器
-	loggedRouter := loggingHandler{handler: mux}
-
-	// 启动HTTP服务器
+	// 设置HTTP服务器
 	log.Printf("启动HTTP服务器，监听端口: %s", cfg.HttpPort)
-	server := &http.Server{
-		Addr:         ":" + cfg.HttpPort,
-		Handler:      loggedRouter,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+	server := setupHTTPServer(healthHandler, metricsHandler, cfg.HttpPort)
+
+	// 创建信号监听通道
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// 在独立的goroutine中启动服务器
+	go func() {
+		log.Printf("指标采集服务已启动，等待请求...")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP服务器错误: %v", err)
+		}
+	}()
+
+	// 等待终止信号
+	<-stop
+	log.Printf("收到终止信号，开始优雅关闭...")
+
+	// 创建一个10秒超时的上下文用于优雅关闭
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 优雅地关闭服务器，等待活跃连接完成
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("服务器关闭错误: %v", err)
 	}
 
-	log.Printf("指标采集服务已启动，等待请求...")
-	log.Fatal(server.ListenAndServe())
+	log.Printf("服务器已安全关闭")
 }

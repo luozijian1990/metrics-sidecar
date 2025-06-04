@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"time"
 
@@ -12,6 +13,18 @@ import (
 	"metrics-sidecar/pkg/k8s"
 	"metrics-sidecar/pkg/metrics"
 )
+
+var (
+	resourceOverLoaded bool
+	rng                *rand.Rand // 用于生成随机数的随机数生成器
+)
+
+// 初始化随机数生成器
+func init() {
+	// 使用当前时间作为随机数种子，确保每次运行程序时都有不同的随机序列
+	source := rand.NewSource(time.Now().UnixNano())
+	rng = rand.New(source)
+}
 
 // HealthHandler 健康检查处理器
 type HealthHandler struct {
@@ -35,7 +48,7 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("开始处理健康检查请求: %s %s", r.Method, r.URL.Path)
 
 	// 按需收集指标
-	metrics, err := h.collectResourceMetrics()
+	resourceMetrics, err := h.collectResourceMetrics()
 	if err != nil {
 		log.Printf("健康检查失败: %v", err)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -47,19 +60,19 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	details := make(map[string]interface{})
 	details["deployment"] = map[string]interface{}{
 		"name":                 h.Config.DeploymentName,
-		"replicas":             metrics.DeploymentReplicas,
-		"available_replicas":   metrics.DeploymentAvailableReplicas,
-		"availability_percent": h.calcPodsRatio(metrics),
+		"replicas":             resourceMetrics.DeploymentReplicas,
+		"available_replicas":   resourceMetrics.DeploymentAvailableReplicas,
+		"availability_percent": h.calcPodsRatio(resourceMetrics),
 	}
 	details["container"] = map[string]interface{}{
-		"name":                 metrics.ContainerName,
-		"ready":                metrics.ContainerReady,
-		"memory_usage_mb":      metrics.ContainerMemUsage,
-		"memory_limit_mb":      metrics.ContainerMemLimit,
-		"memory_percent":       h.calcMemoryPercent(metrics),
-		"cpu_usage_millicores": metrics.ContainerCPUUsage,
-		"cpu_limit_millicores": metrics.ContainerCPULimit,
-		"cpu_percent":          h.calcCPUPercent(metrics),
+		"name":                 resourceMetrics.ContainerName,
+		"ready":                resourceMetrics.ContainerReady,
+		"memory_usage_mb":      resourceMetrics.ContainerMemUsage,
+		"memory_limit_mb":      resourceMetrics.ContainerMemLimit,
+		"memory_percent":       h.calcMemoryPercent(resourceMetrics),
+		"cpu_usage_millicores": resourceMetrics.ContainerCPUUsage,
+		"cpu_limit_millicores": resourceMetrics.ContainerCPULimit,
+		"cpu_percent":          h.calcCPUPercent(resourceMetrics),
 	}
 
 	// 检查容器状态并记录结果
@@ -68,9 +81,9 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var message string
 
 	// 1. 检查容器是否就绪
-	if !metrics.ContainerReady {
+	if !resourceMetrics.ContainerReady {
 		status = "NOT_READY"
-		message = fmt.Sprintf("容器 %s 尚未就绪", metrics.ContainerName)
+		message = fmt.Sprintf("容器 %s 尚未就绪", resourceMetrics.ContainerName)
 		log.Printf("健康检查结果: %s - %s", status, message)
 
 		details["status"] = status
@@ -82,11 +95,11 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. 检查Pod最小可用比例
-	podsRatio := h.calcPodsRatio(metrics)
+	podsRatio := h.calcPodsRatio(resourceMetrics)
 	if podsRatio < h.Config.MinimumPodsToKeepPercent {
 		status = "POD_SHORTAGE"
 		message = fmt.Sprintf("可用Pod数量(%d/%d = %.2f%%)低于最小阈值(%.2f%%)",
-			metrics.DeploymentAvailableReplicas, metrics.DeploymentReplicas,
+			resourceMetrics.DeploymentAvailableReplicas, resourceMetrics.DeploymentReplicas,
 			podsRatio, h.Config.MinimumPodsToKeepPercent)
 		log.Printf("健康检查结果: %s - %s", status, message)
 
@@ -99,30 +112,47 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. 检查资源使用率
-	memUsagePercent := h.calcMemoryPercent(metrics)
-	cpuUsagePercent := h.calcCPUPercent(metrics)
+	memUsagePercent := h.calcMemoryPercent(resourceMetrics)
+	cpuUsagePercent := h.calcCPUPercent(resourceMetrics)
 
-	// 如果CPU和内存同时超过阈值，返回400
-	if memUsagePercent > h.Config.ResourceThresholdMemoryPercent &&
-		cpuUsagePercent > h.Config.ResourceThresholdCPUPercent {
-		status = "RESOURCE_EXHAUSTED"
-		statusCode = http.StatusBadRequest
-		message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
-			memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
-			cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
-		log.Printf("健康检查结果: %s - %s", status, message)
+	// 判断资源是否过载
+	resourceOverLoaded = memUsagePercent > h.Config.ResourceThresholdMemoryPercent &&
+		cpuUsagePercent > h.Config.ResourceThresholdCPUPercent
 
-		details["status"] = status
-		details["message"] = message
-		w.WriteHeader(statusCode)
-		h.writeJSONResponse(w, details)
-		log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
-		return
+	// 如果资源过载，进行随机退避决策
+	if resourceOverLoaded {
+		// 生成0-100的随机数
+		randomValue := rng.Float64() * 100
+
+		// 随机数大于最小保持Pod百分比则继续报告不健康，否则返回健康状态
+		if randomValue > h.Config.MinimumPodsToKeepPercent {
+			status = "RESOURCE_EXHAUSTED"
+			statusCode = http.StatusBadRequest
+			message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
+				memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
+				cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
+			log.Printf("健康检查结果: %s - %s [随机值: %.2f, 决定报告不健康]", status, message, randomValue)
+
+			details["status"] = status
+			details["message"] = message
+			w.WriteHeader(statusCode)
+			h.writeJSONResponse(w, details)
+			log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
+			return
+		} else {
+			// 随机退避，虽然资源过载但返回健康状态
+			log.Printf("检测到资源过载，但随机退避生效 [随机值: %.2f <= 最小保持比例: %.2f]",
+				randomValue, h.Config.MinimumPodsToKeepPercent)
+			status = "RESOURCE_OVERLOADED_BUT_KEEPING"
+			message = fmt.Sprintf("资源使用率过高但随机退避生效: 内存使用率 %.2f%%, CPU使用率 %.2f%%, 随机值 %.2f",
+				memUsagePercent, cpuUsagePercent, randomValue)
+		}
+	} else {
+		// 资源未过载
+		message = fmt.Sprintf("健康检查通过: 内存使用率 %.2f%%, CPU使用率 %.2f%%, Pod可用率 %.2f%%",
+			memUsagePercent, cpuUsagePercent, podsRatio)
 	}
 
-	// 一切正常
-	message = fmt.Sprintf("健康检查通过: 内存使用率 %.2f%%, CPU使用率 %.2f%%, Pod可用率 %.2f%%",
-		memUsagePercent, cpuUsagePercent, podsRatio)
 	log.Printf("健康检查结果: %s - %s", status, message)
 
 	details["status"] = status
@@ -140,7 +170,7 @@ func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, erro
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	metrics := &metrics.ResourceMetrics{
+	m := &metrics.ResourceMetrics{
 		ContainerName: h.Config.ContainerName,
 	}
 
@@ -150,8 +180,8 @@ func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, erro
 	if err != nil {
 		log.Printf("获取Deployment信息失败: %v", err)
 	} else if deploymentInfo != nil {
-		metrics.DeploymentReplicas = deploymentInfo.Replicas
-		metrics.DeploymentAvailableReplicas = deploymentInfo.AvailableReplicas
+		m.DeploymentReplicas = deploymentInfo.Replicas
+		m.DeploymentAvailableReplicas = deploymentInfo.AvailableReplicas
 		log.Printf("Deployment信息: 副本数=%d, 可用副本数=%d",
 			deploymentInfo.Replicas, deploymentInfo.AvailableReplicas)
 	}
@@ -163,8 +193,8 @@ func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, erro
 		log.Printf("获取容器资源限制失败: %v", err)
 		return nil, fmt.Errorf("无法获取容器资源限制: %v", err)
 	}
-	metrics.ContainerCPULimit = containerLimits.CPULimit
-	metrics.ContainerMemLimit = containerLimits.MemLimit
+	m.ContainerCPULimit = containerLimits.CPULimit
+	m.ContainerMemLimit = containerLimits.MemLimit
 	log.Printf("容器资源限制: CPU=%dm, 内存=%dMi",
 		containerLimits.CPULimit, containerLimits.MemLimit)
 
@@ -176,7 +206,7 @@ func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, erro
 	} else if podInfo != nil && podInfo.Containers != nil {
 		container := podInfo.Containers[h.Config.ContainerName]
 		if container != nil {
-			metrics.ContainerReady = container.Ready
+			m.ContainerReady = container.Ready
 			log.Printf("容器就绪状态: %v", container.Ready)
 		}
 	}
@@ -189,15 +219,15 @@ func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, erro
 	} else if podMetrics != nil && podMetrics.Containers != nil {
 		container := podMetrics.Containers[h.Config.ContainerName]
 		if container != nil {
-			metrics.ContainerCPUUsage = container.CPUUsage
-			metrics.ContainerMemUsage = container.MemUsage
+			m.ContainerCPUUsage = container.CPUUsage
+			m.ContainerMemUsage = container.MemUsage
 			log.Printf("容器资源使用: CPU=%dm, 内存=%dMi",
 				container.CPUUsage, container.MemUsage)
 		}
 	}
 
 	log.Printf("资源指标收集完成，耗时: %v", time.Since(startTime))
-	return metrics, nil
+	return m, nil
 }
 
 // 计算Pod可用率

@@ -1,3 +1,4 @@
+# 构建阶段
 FROM golang:1.23-alpine AS builder
 
 # 设置工作目录
@@ -11,10 +12,10 @@ RUN go mod download
 # 复制源代码
 COPY . .
 
-# 构建应用
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o metrics-sidecar .
+# 构建应用（从cmd/metrics-sidecar目录构建）
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o metrics-sidecar ./cmd/metrics-sidecar
 
-# 使用精简的镜像
+# 运行阶段
 FROM alpine:3.17
 
 # 添加基本工具和SSL证书
