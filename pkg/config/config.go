@@ -24,6 +24,9 @@ type Config struct {
 
 	// HTTP服务配置
 	HttpPort string // HTTP服务端口
+
+	// 日志配置
+	LogLevel string // 日志级别 (debug, info, warn, error)
 }
 
 // 获取环境变量，如果不存在则返回默认值
@@ -84,5 +87,6 @@ func NewConfig() *Config {
 		ResourceThresholdCPUPercent:    getEnvAsFloat("RESOURCE_THRESHOLD_CPU_PERCENT", 80.0),
 		MinimumPodsToKeepPercent:       getEnvAsFloat("MINIMUM_PODS_TO_KEEP_PERCENT", 50.0),
 		HttpPort:                       getEnvWithDefault("HTTP_PORT", "8333"),
+		LogLevel:                       getEnvWithDefault("LOG_LEVEL", "info"),
 	}
 }

@@ -193,6 +193,7 @@ spec:
 | `RESOURCE_THRESHOLD_CPU_PERCENT` | CPU使用率告警阈值(%) | 80 |
 | `MINIMUM_PODS_TO_KEEP_PERCENT` | 最小可用Pod百分比和随机退避阈值(%) | 50 |
 | `HTTP_PORT` | HTTP服务监听端口 | 8333 |
+| `LOG_LEVEL` | 日志级别 (debug, info, warn, error) | info |
 
 ### 🔄 MINIMUM_PODS_TO_KEEP_PERCENT参数详解
 

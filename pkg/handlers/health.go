@@ -4,14 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"time"
 
 	"metrics-sidecar/pkg/config"
 	"metrics-sidecar/pkg/k8s"
+	"metrics-sidecar/pkg/logger"
 	"metrics-sidecar/pkg/metrics"
+
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -20,6 +22,9 @@ var (
 
 	// 标记是否继续进行随机决策，初始为true表示需要随机决策
 	shouldRandomize = true
+
+	// 健康检查处理器的日志器
+	log = logger.GetLogger("health")
 )
 
 // 初始化随机数生成器
@@ -48,12 +53,15 @@ func NewHealthHandler(k8sClient *k8s.Client, metricsCollector *metrics.MetricsCo
 // ServeHTTP 实现http.Handler接口
 func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	log.Printf("开始处理健康检查请求: %s %s", r.Method, r.URL.Path)
+	log.WithFields(logrus.Fields{
+		"method": r.Method,
+		"path":   r.URL.Path,
+	}).Info("开始处理健康检查请求")
 
 	// 按需收集指标
 	resourceMetrics, err := h.collectResourceMetrics()
 	if err != nil {
-		log.Printf("健康检查失败: %v", err)
+		log.WithError(err).Error("健康检查失败")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintf(w, "健康检查失败: 无法收集资源指标 - %v", err)
 		return
@@ -87,13 +95,13 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !resourceMetrics.ContainerReady {
 		status = "NOT_READY"
 		message = fmt.Sprintf("容器 %s 尚未就绪", resourceMetrics.ContainerName)
-		log.Printf("健康检查结果: %s - %s", status, message)
+		log.WithField("status", status).Info(message)
 
 		details["status"] = status
 		details["message"] = message
 		w.WriteHeader(statusCode)
 		h.writeJSONResponse(w, details)
-		log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
+		log.WithField("duration", time.Since(startTime)).Info("健康检查请求处理完成")
 		return
 	}
 
@@ -104,13 +112,13 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		message = fmt.Sprintf("可用Pod数量(%d/%d = %.2f%%)低于最小阈值(%.2f%%)",
 			resourceMetrics.DeploymentAvailableReplicas, resourceMetrics.DeploymentReplicas,
 			podsRatio, h.Config.MinimumPodsToKeepPercent)
-		log.Printf("健康检查结果: %s - %s", status, message)
+		log.WithField("status", status).Info(message)
 
 		details["status"] = status
 		details["message"] = message
 		w.WriteHeader(statusCode)
 		h.writeJSONResponse(w, details)
-		log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
+		log.WithField("duration", time.Since(startTime)).Info("健康检查请求处理完成")
 		return
 	}
 
@@ -132,19 +140,26 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// 如果随机值大于阈值，设置为不再随机并返回不健康状态
 			if randomValue > h.Config.MinimumPodsToKeepPercent {
 				shouldRandomize = false // 第一次随机大于阈值，后续都不再随机
-				log.Printf("首次随机决策: 随机值 %.2f > %.2f，固定拒绝流量",
-					randomValue, h.Config.MinimumPodsToKeepPercent)
+				log.WithFields(logrus.Fields{
+					"random_value": randomValue,
+					"threshold":    h.Config.MinimumPodsToKeepPercent,
+				}).Info("首次随机决策: 固定拒绝流量")
 
 				status = "RESOURCE_EXHAUSTED"
 				statusCode = http.StatusBadRequest
 				message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
 					memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
 					cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
-				log.Printf("健康检查结果: %s - %s [固定拒绝流量]", status, message)
+				log.WithFields(logrus.Fields{
+					"status":  status,
+					"message": message,
+				}).Info("健康检查结果: 固定拒绝流量")
 			} else {
 				// 随机值小于等于阈值，保持允许随机状态，本次返回健康
-				log.Printf("首次随机决策: 随机值 %.2f <= %.2f，继续随机决策",
-					randomValue, h.Config.MinimumPodsToKeepPercent)
+				log.WithFields(logrus.Fields{
+					"random_value": randomValue,
+					"threshold":    h.Config.MinimumPodsToKeepPercent,
+				}).Info("首次随机决策: 继续随机决策")
 				status = "RESOURCE_OVERLOADED_BUT_KEEPING"
 				message = fmt.Sprintf("资源使用率过高但随机退避生效: 内存使用率 %.2f%%, CPU使用率 %.2f%%, 随机值 %.2f",
 					memUsagePercent, cpuUsagePercent, randomValue)
@@ -156,7 +171,10 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
 				memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
 				cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
-			log.Printf("健康检查结果: %s - %s [之前已决策固定拒绝流量]", status, message)
+			log.WithFields(logrus.Fields{
+				"status":  status,
+				"message": message,
+			}).Info("健康检查结果: 之前已决策固定拒绝流量")
 		}
 	} else {
 		// 资源未过载，重置标志位，允许下次资源过载时重新随机
@@ -171,76 +189,85 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	details["message"] = message
 	w.WriteHeader(statusCode)
 	h.writeJSONResponse(w, details)
-	log.Printf("健康检查结果: %s - %s", status, message)
-	log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
+	log.WithFields(logrus.Fields{
+		"status":   status,
+		"message":  message,
+		"duration": time.Since(startTime),
+	}).Info("健康检查请求处理完成")
 }
 
 // 收集资源指标
 func (h *HealthHandler) collectResourceMetrics() (*metrics.ResourceMetrics, error) {
-	log.Printf("开始收集资源指标")
+	log.Info("开始收集资源指标")
 	startTime := time.Now()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	m := &metrics.ResourceMetrics{
+	metrics := &metrics.ResourceMetrics{
 		ContainerName: h.Config.ContainerName,
 	}
 
 	// 获取Deployment信息
-	log.Printf("获取Deployment[%s]信息", h.Config.DeploymentName)
+	log.WithField("deployment", h.Config.DeploymentName).Info("获取Deployment信息")
 	deploymentInfo, err := h.K8sClient.GetDeploymentInfo(ctx)
 	if err != nil {
-		log.Printf("获取Deployment信息失败: %v", err)
+		log.WithError(err).Error("获取Deployment信息失败")
 	} else if deploymentInfo != nil {
-		m.DeploymentReplicas = deploymentInfo.Replicas
-		m.DeploymentAvailableReplicas = deploymentInfo.AvailableReplicas
-		log.Printf("Deployment信息: 副本数=%d, 可用副本数=%d",
-			deploymentInfo.Replicas, deploymentInfo.AvailableReplicas)
+		metrics.DeploymentReplicas = deploymentInfo.Replicas
+		metrics.DeploymentAvailableReplicas = deploymentInfo.AvailableReplicas
+		log.WithFields(logrus.Fields{
+			"replicas":           deploymentInfo.Replicas,
+			"available_replicas": deploymentInfo.AvailableReplicas,
+		}).Debug("Deployment信息")
 	}
 
 	// 获取容器资源限制 (直接使用已缓存的值)
-	log.Printf("获取容器[%s]资源限制", h.Config.ContainerName)
+	log.WithField("container", h.Config.ContainerName).Info("获取容器资源限制")
 	containerLimits, err := h.K8sClient.GetContainerLimits(ctx)
 	if err != nil {
-		log.Printf("获取容器资源限制失败: %v", err)
+		log.WithError(err).Error("获取容器资源限制失败")
 		return nil, fmt.Errorf("无法获取容器资源限制: %v", err)
 	}
-	m.ContainerCPULimit = containerLimits.CPULimit
-	m.ContainerMemLimit = containerLimits.MemLimit
-	log.Printf("容器资源限制: CPU=%dm, 内存=%dMi",
-		containerLimits.CPULimit, containerLimits.MemLimit)
+	metrics.ContainerCPULimit = containerLimits.CPULimit
+	metrics.ContainerMemLimit = containerLimits.MemLimit
+	log.WithFields(logrus.Fields{
+		"cpu":    containerLimits.CPULimit,
+		"memory": containerLimits.MemLimit,
+	}).Debug("容器资源限制")
 
 	// 获取Pod信息
-	log.Printf("获取Pod[%s]信息", h.Config.PodName)
+	log.WithField("pod", h.Config.PodName).Info("获取Pod信息")
 	podInfo, err := h.K8sClient.GetPodInfo(ctx)
 	if err != nil {
-		log.Printf("获取Pod信息失败: %v", err)
+		log.WithError(err).Error("获取Pod信息失败")
 	} else if podInfo != nil && podInfo.Containers != nil {
 		container := podInfo.Containers[h.Config.ContainerName]
 		if container != nil {
-			m.ContainerReady = container.Ready
-			log.Printf("容器就绪状态: %v", container.Ready)
+			metrics.ContainerReady = container.Ready
+			log.WithField("ready", container.Ready).Debug("容器就绪状态")
 		}
 	}
 
 	// 获取Pod度量指标
-	log.Printf("获取Pod度量指标")
+	log.Info("获取Pod度量指标")
 	podMetrics, err := h.MetricsCollector.GetPodMetrics(ctx)
 	if err != nil {
-		log.Printf("获取Pod度量指标失败: %v", err)
+		log.WithError(err).Error("获取Pod度量指标失败")
 	} else if podMetrics != nil && podMetrics.Containers != nil {
 		container := podMetrics.Containers[h.Config.ContainerName]
 		if container != nil {
-			m.ContainerCPUUsage = container.CPUUsage
-			m.ContainerMemUsage = container.MemUsage
-			log.Printf("容器资源使用: CPU=%dm, 内存=%dMi",
-				container.CPUUsage, container.MemUsage)
+			metrics.ContainerCPUUsage = container.CPUUsage
+			metrics.ContainerMemUsage = container.MemUsage
+			log.WithFields(logrus.Fields{
+				"cpu":    container.CPUUsage,
+				"memory": container.MemUsage,
+			}).Debug("容器资源使用")
 		}
 	}
 
-	log.Printf("资源指标收集完成，耗时: %v", time.Since(startTime))
-	return m, nil
+	log.WithField("duration", time.Since(startTime)).Info("资源指标收集完成")
+	return metrics, nil
 }
 
 // 计算Pod可用率
@@ -272,7 +299,7 @@ func (h *HealthHandler) writeJSONResponse(w http.ResponseWriter, data interface{
 	w.Header().Set("Content-Type", "application/json")
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		log.Printf("序列化JSON失败: %v", err)
+		log.WithError(err).Error("序列化JSON失败")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

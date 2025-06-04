@@ -3,9 +3,9 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
@@ -14,7 +14,13 @@ import (
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"metrics-sidecar/pkg/config"
+	"metrics-sidecar/pkg/logger"
 	"metrics-sidecar/pkg/metrics"
+)
+
+var (
+	// k8s客户端的日志器
+	k8sLog = logger.GetLogger("k8s")
 )
 
 // Client 封装Kubernetes相关客户端
@@ -32,14 +38,14 @@ func NewClient(cfg *config.Config) (*Client, error) {
 
 	if cfg.InClusterConfig {
 		// 使用集群内配置
-		log.Printf("使用InCluster配置连接Kubernetes集群")
+		k8sLog.Info("使用InCluster配置连接Kubernetes集群")
 		kubeConfig, err = rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("创建InCluster配置失败: %v", err)
 		}
 	} else {
 		// 使用外部配置文件
-		log.Printf("使用kubeconfig文件连接Kubernetes集群: %s", cfg.KubeconfigPath)
+		k8sLog.WithField("kubeconfig", cfg.KubeconfigPath).Info("使用kubeconfig文件连接Kubernetes集群")
 		kubeConfig, err = clientcmd.BuildConfigFromFlags("", cfg.KubeconfigPath)
 		if err != nil {
 			return nil, fmt.Errorf("构建K8s配置失败: %v", err)
@@ -82,7 +88,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 
 // initContainerLimits 初始化时获取容器资源限制
 func (c *Client) initContainerLimits() (*metrics.ContainerLimits, error) {
-	log.Printf("初始化: 获取容器[%s]资源限制", c.Config.ContainerName)
+	k8sLog.WithField("container", c.Config.ContainerName).Info("初始化: 获取容器资源限制")
 
 	// 设置超时上下文
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -95,14 +101,14 @@ func (c *Client) initContainerLimits() (*metrics.ContainerLimits, error) {
 	var lastErr error
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
-			log.Printf("尝试获取容器资源限制, 第%d次重试...", i+1)
+			k8sLog.WithField("retry", i+1).Info("尝试获取容器资源限制")
 			time.Sleep(retryInterval)
 		}
 
 		deploy, err := c.KubeClient.AppsV1().Deployments(c.Config.Namespace).Get(ctx, c.Config.DeploymentName, metav1.GetOptions{})
 		if err != nil {
 			lastErr = fmt.Errorf("获取Deployment失败: %v", err)
-			log.Printf("获取Deployment信息失败: %v, 将重试", err)
+			k8sLog.WithError(err).Warn("获取Deployment信息失败，将重试")
 			continue
 		}
 
@@ -115,11 +121,17 @@ func (c *Client) initContainerLimits() (*metrics.ContainerLimits, error) {
 				// 验证资源限制是否有效
 				if cpuLimit <= 0 || memLimit <= 0 {
 					lastErr = fmt.Errorf("无效的资源限制值: CPU=%dm, Memory=%dMi", cpuLimit, memLimit)
-					log.Printf("警告: %v", lastErr)
+					k8sLog.WithFields(logrus.Fields{
+						"cpu":    cpuLimit,
+						"memory": memLimit,
+					}).Warn("警告: 资源限制值无效")
 					continue
 				}
 
-				log.Printf("成功获取容器资源限制: CPU=%dm, Memory=%dMi", cpuLimit, memLimit)
+				k8sLog.WithFields(logrus.Fields{
+					"cpu":    cpuLimit,
+					"memory": memLimit,
+				}).Info("成功获取容器资源限制")
 				return &metrics.ContainerLimits{
 					CPULimit: cpuLimit,
 					MemLimit: memLimit,
@@ -128,7 +140,10 @@ func (c *Client) initContainerLimits() (*metrics.ContainerLimits, error) {
 		}
 
 		lastErr = fmt.Errorf("在Deployment[%s]中未找到容器[%s]", c.Config.DeploymentName, c.Config.ContainerName)
-		log.Printf("警告: %v", lastErr)
+		k8sLog.WithFields(logrus.Fields{
+			"deployment": c.Config.DeploymentName,
+			"container":  c.Config.ContainerName,
+		}).Warn("警告: 未找到指定容器")
 	}
 
 	// 所有重试都失败了
