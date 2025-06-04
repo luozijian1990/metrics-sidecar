@@ -14,7 +14,7 @@ spec:
         app: example-app
     spec:
       # 指定使用metrics-sidecar的ServiceAccount
-      serviceAccountName: metrics-sidecar
+      serviceAccountName: metrics-sidecar-cluster
       containers:
       - name: main-app
         image: your-app-image:latest

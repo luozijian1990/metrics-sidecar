@@ -5,6 +5,7 @@
 在高负载的Kubernetes环境中，我们面临着一个普遍而棘手的挑战：**如何智能地管理资源过载Pod的流量？** 当某个Pod的资源使用率飙升时，继续向其分发请求往往会导致服务质量严重下降，甚至引发连锁故障。传统的Kubernetes机制在这方面存在明显不足。
 
 **⚠️ 现实痛点**
+
 - 🔥 **资源热点问题**：高负载Pod继续接收流量，导致响应时间剧增，用户体验迅速恶化
 - ⏱️ **扩容滞后效应**：HPA虽能水平扩展资源，但难以即时解决已过载实例的问题
 - 🔄 **复杂解决方案**：服务网格等高级方案虽有效，但引入过多复杂性和资源开销
@@ -111,20 +112,24 @@ docker run -v $HOME/.kube/config:/app/kube-config.yaml metrics-sidecar:latest
 <summary>展开查看安装方法</summary>
 
 1. **使用Helm安装**:
+
    ```bash
    helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
    helm upgrade --install metrics-server metrics-server/metrics-server --namespace kube-system
    ```
 
 2. **使用YAML文件安装**:
+
    ```bash
    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
    ```
 
 3. **Minikube环境**:
+
    ```bash
    minikube addons enable metrics-server
    ```
+
 </details>
 
 ## 🔌 Kubernetes集成
@@ -203,6 +208,7 @@ spec:
 2. **⚖️ 随机退避阈值**：资源过载时，约有此百分比的Pod会保持健康状态继续服务
 
 例如，设置为30%意味着：
+
 - 当部署中可用Pod少于总数30%时，所有Pod都会保持健康状态
 - 资源过载时，大约30%的Pod会继续接收流量，其余70%将暂时拒绝新请求
 
@@ -238,46 +244,62 @@ go tool cover -html=coverage.out -o coverage.html
 
 ## 🔐 RBAC权限配置
 
-Metrics Sidecar需要特定的Kubernetes权限才能访问Pod、Deployment信息和metrics-server数据。
+Metrics Sidecar需要特定的Kubernetes权限才能访问Pod、Deployment信息和metrics-server数据。根据您的监控需求，可以选择两种权限配置方案：
 
 <details>
 <summary><b>💼 命名空间级别权限</b> (单一命名空间监控)</summary>
 
-适用于只监控单个命名空间内的应用场景。创建并应用以下资源：
+适用于只监控单个命名空间内的应用场景。通过命名空间级别的RBAC配置创建所需权限。
 
 ```bash
 kubectl apply -f kubernetes/rbac.yaml
 ```
 
 这将创建：
-- **ServiceAccount**: `metrics-sidecar`
-- **Role**: 具有访问特定命名空间内资源的权限
+
+- **ServiceAccount**: `metrics-sidecar`（在当前命名空间中）
+- **Role**: 具有访问特定命名空间内Pod、Deployment和Pod指标的权限
 - **RoleBinding**: 将Role绑定到ServiceAccount
+
 </details>
 
 <details>
-<summary><b>🌐 集群级别权限</b> (多命名空间监控)</summary>
+<summary><b>🌐 集群级别权限</b> (跨命名空间监控)</summary>
 
-适用于需要监控多个命名空间的场景。创建并应用以下资源：
+适用于需要监控多个命名空间的场景，特别是需要访问节点级指标时。创建并应用以下资源：
 
 ```bash
 kubectl apply -f kubernetes/cluster-rbac.yaml
 ```
 
 这将创建：
-- **ServiceAccount**: `metrics-sidecar-cluster`（在monitoring命名空间中）
-- **ClusterRole**: 具有访问所有命名空间资源的权限
+
+- **ServiceAccount**: `metrics-sidecar-cluster`（在default命名空间中）
+- **ClusterRole**: 具有以下权限：
+  - 访问所有命名空间中的Deployment资源
+  - 访问所有命名空间中的Pod资源
+  - 访问所有命名空间中的Pod和Node指标资源
 - **ClusterRoleBinding**: 将ClusterRole绑定到ServiceAccount
+
 </details>
 
-在部署时，确保指定正确的ServiceAccount：
+### 在部署中指定服务账号
+
+在您的Deployment配置中，根据您选择的RBAC配置指定相应的ServiceAccount：
 
 ```yaml
 spec:
   template:
     spec:
-      serviceAccountName: metrics-sidecar  # 或 metrics-sidecar-cluster
+
+      
+      # 使用集群级别权限
+      serviceAccountName: metrics-sidecar-cluster
 ```
+
+### 常见权限问题
+
+如果遇到类似`nodes.metrics.k8s.io is forbidden`的错误，这通常表示缺少对集群级别资源的访问权限。在这种情况下，您应该使用集群级别的权限配置（cluster-rbac.yaml）。
 
 ## 📊 探针机制优化
 
@@ -305,4 +327,3 @@ spec:
 - [Kubernetes官方文档 - Pod健康检查](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
 - [metrics-server GitHub仓库](https://github.com/kubernetes-sigs/metrics-server)
 - [Go client for Kubernetes](https://github.com/kubernetes/client-go)
-
