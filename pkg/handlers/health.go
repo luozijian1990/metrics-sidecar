@@ -17,6 +17,9 @@ import (
 var (
 	resourceOverLoaded bool
 	rng                *rand.Rand // 用于生成随机数的随机数生成器
+
+	// 标记是否继续进行随机决策，初始为true表示需要随机决策
+	shouldRandomize = true
 )
 
 // 初始化随机数生成器
@@ -121,44 +124,54 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 如果资源过载，进行随机退避决策
 	if resourceOverLoaded {
-		// 生成0-100的随机数
-		randomValue := rng.Float64() * 100
+		// 如果允许随机决策，执行随机逻辑
+		if shouldRandomize {
+			// 生成0-100的随机数
+			randomValue := rng.Float64() * 100
 
-		// 随机数大于最小保持Pod百分比则继续报告不健康，否则返回健康状态
-		if randomValue > h.Config.MinimumPodsToKeepPercent {
+			// 如果随机值大于阈值，设置为不再随机并返回不健康状态
+			if randomValue > h.Config.MinimumPodsToKeepPercent {
+				shouldRandomize = false // 第一次随机大于阈值，后续都不再随机
+				log.Printf("首次随机决策: 随机值 %.2f > %.2f，固定拒绝流量",
+					randomValue, h.Config.MinimumPodsToKeepPercent)
+
+				status = "RESOURCE_EXHAUSTED"
+				statusCode = http.StatusBadRequest
+				message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
+					memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
+					cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
+				log.Printf("健康检查结果: %s - %s [固定拒绝流量]", status, message)
+			} else {
+				// 随机值小于等于阈值，保持允许随机状态，本次返回健康
+				log.Printf("首次随机决策: 随机值 %.2f <= %.2f，继续随机决策",
+					randomValue, h.Config.MinimumPodsToKeepPercent)
+				status = "RESOURCE_OVERLOADED_BUT_KEEPING"
+				message = fmt.Sprintf("资源使用率过高但随机退避生效: 内存使用率 %.2f%%, CPU使用率 %.2f%%, 随机值 %.2f",
+					memUsagePercent, cpuUsagePercent, randomValue)
+			}
+		} else {
+			// 之前已经随机过且大于阈值，固定返回不健康状态
 			status = "RESOURCE_EXHAUSTED"
 			statusCode = http.StatusBadRequest
 			message = fmt.Sprintf("资源使用率过高: 内存使用率 %.2f%% (阈值: %.2f%%), CPU使用率 %.2f%% (阈值: %.2f%%)",
 				memUsagePercent, h.Config.ResourceThresholdMemoryPercent,
 				cpuUsagePercent, h.Config.ResourceThresholdCPUPercent)
-			log.Printf("健康检查结果: %s - %s [随机值: %.2f, 决定报告不健康]", status, message, randomValue)
-
-			details["status"] = status
-			details["message"] = message
-			w.WriteHeader(statusCode)
-			h.writeJSONResponse(w, details)
-			log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
-			return
-		} else {
-			// 随机退避，虽然资源过载但返回健康状态
-			log.Printf("检测到资源过载，但随机退避生效 [随机值: %.2f <= 最小保持比例: %.2f]",
-				randomValue, h.Config.MinimumPodsToKeepPercent)
-			status = "RESOURCE_OVERLOADED_BUT_KEEPING"
-			message = fmt.Sprintf("资源使用率过高但随机退避生效: 内存使用率 %.2f%%, CPU使用率 %.2f%%, 随机值 %.2f",
-				memUsagePercent, cpuUsagePercent, randomValue)
+			log.Printf("健康检查结果: %s - %s [之前已决策固定拒绝流量]", status, message)
 		}
 	} else {
+		// 资源未过载，重置标志位，允许下次资源过载时重新随机
+		shouldRandomize = true
+
 		// 资源未过载
 		message = fmt.Sprintf("健康检查通过: 内存使用率 %.2f%%, CPU使用率 %.2f%%, Pod可用率 %.2f%%",
 			memUsagePercent, cpuUsagePercent, podsRatio)
 	}
 
-	log.Printf("健康检查结果: %s - %s", status, message)
-
 	details["status"] = status
 	details["message"] = message
 	w.WriteHeader(statusCode)
 	h.writeJSONResponse(w, details)
+	log.Printf("健康检查结果: %s - %s", status, message)
 	log.Printf("健康检查请求处理完成，耗时: %v", time.Since(startTime))
 }
 
