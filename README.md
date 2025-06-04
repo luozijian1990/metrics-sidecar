@@ -61,7 +61,6 @@ Kubernetes指标收集工具，用于监控Pod和容器的资源使用情况。�
 项目采用规范的Go模块化架构设计：
 
 ```
-.
 ├── cmd/                      # 命令行程序入口
 │   └── metrics-sidecar/      # 主应用入口点
 │       └── main.go           # 程序主入口
@@ -69,14 +68,68 @@ Kubernetes指标收集工具，用于监控Pod和容器的资源使用情况。�
 │   ├── config/               # 配置管理模块
 │   ├── handlers/             # HTTP处理器模块
 │   ├── k8s/                  # Kubernetes客户端
+│   ├── logger/               # 日志系统模块
 │   └── metrics/              # 指标收集与处理
 ├── kubernetes/               # K8s部署配置
-│   ├── rbac.yaml             # 命名空间级权限
 │   └── cluster-rbac.yaml     # 集群级权限配置
 ├── Dockerfile                # 容器构建定义
 ├── go.mod                    # Go模块依赖
 └── README.md                 # 项目文档
 ```
+
+## 📝 日志系统
+
+项目采用结构化的日志系统，基于logrus库实现，支持不同日志级别和上下文信息的记录。
+
+### 日志级别
+
+通过环境变量`LOG_LEVEL`可配置不同的日志级别：
+
+| 级别 | 描述 | 使用场景 |
+|:----:|:-----|:--------|
+| `debug` | 详细的调试信息 | 开发环境，问题排查 |
+| `info` | 常规运行信息 | 生产环境默认级别 |
+| `warn` | 警告信息 | 潜在问题，但不影响正常运行 |
+| `error` | 错误信息 | 影响功能的问题 |
+
+### 日志格式
+
+日志输出包含以下信息：
+- 时间戳：精确到毫秒
+- 日志级别：颜色编码区分不同级别
+- 组件名称：指示日志来源模块
+- 调用位置：文件名和行号
+- 上下文信息：结构化字段
+- 日志消息：实际内容
+
+### 使用示例
+
+每个模块使用特定的logger实例，自动添加组件标识：
+
+```go
+// 获取特定组件的logger
+log := logger.GetLogger("health")
+
+// 基本信息日志
+log.Info("系统启动中...")
+
+// 带字段的结构化日志
+log.WithFields(logrus.Fields{
+    "pod": podName,
+    "namespace": namespace,
+}).Info("资源监控开始")
+
+// 错误日志
+log.WithError(err).Error("连接失败")
+```
+
+### HTTP请求日志
+
+所有HTTP请求自动记录以下信息：
+- 远程地址：客户端IP
+- 请求方法：GET, POST等
+- 请求路径：API路径
+- 处理时间：请求处理耗时
 
 ## 🚀 构建与运行
 
@@ -171,6 +224,8 @@ spec:
           value: "80"
         - name: MINIMUM_PODS_TO_KEEP_PERCENT
           value: "30"
+        - name: LOG_LEVEL
+          value: "info"  # 可选值: debug, info, warn, error
         
       # 配置主应用的就绪探针指向sidecar的健康检查接口
       readinessProbe:
@@ -198,7 +253,7 @@ spec:
 | `RESOURCE_THRESHOLD_CPU_PERCENT` | CPU使用率告警阈值(%) | 80 |
 | `MINIMUM_PODS_TO_KEEP_PERCENT` | 最小可用Pod百分比和随机退避阈值(%) | 50 |
 | `HTTP_PORT` | HTTP服务监听端口 | 8333 |
-| `LOG_LEVEL` | 日志级别 (debug, info, warn, error) | info |
+| `LOG_LEVEL` | 日志级别，支持debug/info/warn/error | info |
 
 ### 🔄 MINIMUM_PODS_TO_KEEP_PERCENT参数详解
 
@@ -211,6 +266,17 @@ spec:
 
 - 当部署中可用Pod少于总数30%时，所有Pod都会保持健康状态
 - 资源过载时，大约30%的Pod会继续接收流量，其余70%将暂时拒绝新请求
+
+### 📊 LOG_LEVEL参数详解
+
+`LOG_LEVEL`参数控制日志输出的详细程度：
+
+- **debug**: 输出所有级别日志，包括详细的调试信息，适用于问题排查和开发环境
+- **info**: 输出信息、警告和错误日志，适用于正常运行的生产环境（默认）
+- **warn**: 仅输出警告和错误信息，减少日志量
+- **error**: 仅输出错误信息，最小化日志输出
+
+在生产环境中，建议使用`info`级别以保持合理的日志详细度；在排查问题时可临时调整为`debug`级别获取更多信息。
 
 ## 🧪 单元测试
 
@@ -241,6 +307,7 @@ go tool cover -html=coverage.out -o coverage.html
 ✅ **指标收集**：测试资源指标的收集和处理逻辑  
 ✅ **健康检查**：验证各种资源使用场景下的健康状态判断  
 ✅ **计算函数**：测试资源比例和阈值计算的准确性  
+✅ **日志系统**：验证不同日志级别的正确过滤和格式化输出
 
 ## 🔐 RBAC权限配置
 
